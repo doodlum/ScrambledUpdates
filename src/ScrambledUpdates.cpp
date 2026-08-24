@@ -55,7 +55,7 @@ namespace
 
 	enum class Status : std::uint8_t
 	{
-		Waiting,  // not loaded, and may never be - that is not an error
+		Waiting,
 		Patched,
 		Failed,
 	};
@@ -205,8 +205,6 @@ namespace
 			}
 		}
 
-		// A module that never loaded is not an error - that mod is simply not
-		// installed. Only one that loaded and could not be patched is.
 		std::string warning;
 		if (!failed.empty())
 		{
@@ -241,7 +239,6 @@ SKSEPluginLoad(const SKSE::LoadInterface* skse)
 {
 	if (NeedsPatching())
 	{
-		// false, or Init replaces the logger opened in preload.
 		SKSE::Init(skse, false);
 		SKSE::GetMessagingInterface()->RegisterListener(OnMessage);
 	}
