@@ -23,10 +23,6 @@ namespace Patches
 		{ 0x00690E, 2, 0xB08 },  // mov ecx, dword ptr [rsi + 0xB00]
 	};
 
-	// The CodeView GUID identifying one build, laid out as the record stores it.
-	// A plugin version would not do: both of the newer plugins report version 1,
-	// which a rebuild would likely keep, and the RVAs below would then describe a
-	// binary we no longer have. tools/build_identity.py prints these.
 	struct Guid
 	{
 		std::uint32_t data1;
