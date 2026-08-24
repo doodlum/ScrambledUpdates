@@ -62,9 +62,6 @@ namespace
 
 	Status g_status[std::size(Patches::MODULES)]{};
 
-	// The GUID out of the loaded image's CodeView record, which identifies the
-	// exact build. Debug directory is data directory 6; entry type 2 is CodeView,
-	// and in a mapped image its payload is at an RVA rather than a file offset.
 	const Patches::Guid* BuildGuid(const std::uint8_t* base)
 	{
 		const auto* pe = base + *reinterpret_cast<const std::uint32_t*>(base + 0x3C);
