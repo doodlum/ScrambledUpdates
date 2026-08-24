@@ -1,5 +1,5 @@
 #include "Patches.h"
-#include "ScrambledBugs.h"
+#include "Relocation.h"
 
 #include <RE/M/Misc.h>
 #include <REL/Module.h>
@@ -24,25 +24,25 @@ namespace
 
 	// Replaces Relocation::AddressLibrary::Header::Read
 	void __fastcall HookHeaderRead(
-		ScrambledBugs::Header*        self,
-		void*                         /*stream*/,
-		const ScrambledBugs::Version* productVersion)
+		Relocation::Header*        self,
+		void*                      /*stream*/,
+		const Relocation::Version* productVersion)
 	{
-		self->format         = ScrambledBugs::FORMAT_ANNIVERSARY_EDITION;
+		self->format         = Relocation::FORMAT_ANNIVERSARY_EDITION;
 		self->productVersion = *productVersion;
 		self->fileNameLength = 0;
 		self->pointerSize    = sizeof(void*);
 
 		// Entries that exist, not the file's identifier range, so the mapping
-		// ScrambledBugs sizes from this has no slack to fill.
+		// sized from this has no slack to fill.
 		self->addressCount = static_cast<std::int32_t>(g_table->size());
 	}
 
 	// Replaces Relocation::AddressLibrary::Read
 	void __fastcall HookRead(
-		ScrambledBugs::Element*      destination,
-		void*                        /*stream*/,
-		const ScrambledBugs::Header* /*header*/)
+		Relocation::Element*      destination,
+		void*                     /*stream*/,
+		const Relocation::Header* /*header*/)
 	{
 		std::size_t written{ 0 };
 		for (const auto& entry : *g_table)
@@ -53,8 +53,14 @@ namespace
 		logger::info("loaded {} addresses", written);
 	}
 
-	bool g_attempted{ false };
-	bool g_patched{ false };
+	enum class Status : std::uint8_t
+	{
+		Waiting,  // not loaded, and may never be - that is not an error
+		Patched,
+		Failed,
+	};
+
+	Status g_status[std::size(Patches::MODULES)]{};
 
 	std::uint32_t PluginVersion(REX::W32::HMODULE module)
 	{
@@ -78,45 +84,52 @@ namespace
 		REL::safe_write(reinterpret_cast<std::uintptr_t>(target), jump, sizeof(jump));
 	}
 
-	void Apply()
+	bool Patch(const Patches::Module& target, REX::W32::HMODULE module)
 	{
-		if (g_attempted)
-		{
-			return;
-		}
-
-		auto module = REX::W32::GetModuleHandleW(ScrambledBugs::MODULE_NAME);
-		if (!module)
-		{
-			return;
-		}
-
-		g_attempted = true;
-
 		const auto version = PluginVersion(module);
-		if (version != Patches::PLUGIN_VERSION)
+		if (version != target.pluginVersion)
 		{
-			logger::error("ScrambledBugs is plugin version {}, expected {}",
-			              version, Patches::PLUGIN_VERSION);
-			return;
+			logger::error("{} is plugin version {}, expected {}",
+			              target.name, version, target.pluginVersion);
+			return false;
 		}
 
 		auto* base = reinterpret_cast<std::uint8_t*>(module);
 
-		for (const auto& site : Patches::DISPLACEMENTS)
+		for (const auto& site : target.displacements)
 		{
 			REL::safe_write(
 				reinterpret_cast<std::uintptr_t>(base + site.rva + site.displacementAt),
 				site.corrected);
 		}
 
-		AbsoluteJump(base + Patches::HEADER_READ, &HookHeaderRead);
-		AbsoluteJump(base + Patches::ADDRESS_LIBRARY_READ, &HookRead);
+		AbsoluteJump(base + target.headerRead, &HookHeaderRead);
+		AbsoluteJump(base + target.addressLibraryRead, &HookRead);
 
-		g_patched = true;
-		logger::info("patched ScrambledBugs {} at {}: {} displacements corrected",
-		             version, static_cast<const void*>(base),
-		             std::size(Patches::DISPLACEMENTS));
+		logger::info("patched {} {} at {}: {} displacements",
+		             target.name, version, static_cast<const void*>(base),
+		             target.displacements.size());
+		return true;
+	}
+
+	void Apply()
+	{
+		for (std::size_t i = 0; i < std::size(Patches::MODULES); ++i)
+		{
+			if (g_status[i] != Status::Waiting)
+			{
+				continue;
+			}
+
+			const auto& target = Patches::MODULES[i];
+			auto        module = REX::W32::GetModuleHandleW(target.file);
+			if (!module)
+			{
+				continue;
+			}
+
+			g_status[i] = Patch(target, module) ? Status::Patched : Status::Failed;
+		}
 	}
 
 	constexpr std::uint32_t DLL_NOTIFICATION_REASON_LOADED{ 1 };
@@ -133,7 +146,7 @@ namespace
 		}
 	}
 
-	void WatchForScrambledBugs()
+	void WatchForPlugins()
 	{
 		auto add = reinterpret_cast<RegisterNotification>(REX::W32::GetProcAddress(
 			REX::W32::GetModuleHandleW(L"ntdll.dll"), "LdrRegisterDllNotification"));
@@ -141,7 +154,7 @@ namespace
 		void* dummy{ nullptr };
 		if (add(0, &OnDllLoaded, nullptr, &dummy) != 0)
 		{
-			logger::error("could not watch for ScrambledBugs");
+			logger::error("could not watch for the plugins to patch");
 		}
 	}
 
@@ -171,18 +184,48 @@ namespace
 
 	void OnMessage(SKSE::MessagingInterface::Message* message)
 	{
-		if (message->type != SKSE::MessagingInterface::kDataLoaded || g_patched)
+		if (message->type != SKSE::MessagingInterface::kDataLoaded)
 		{
 			return;
 		}
 
-		const auto* warning = REX::W32::GetModuleHandleW(ScrambledBugs::MODULE_NAME)
-			? "ScrambledBugs is installed but could not be patched, so its fixes are "
-			  "not working. See ScrambledUpdates.log"
-			: "ScrambledBugs is not installed, so ScrambledUpdates is inactive";
+		std::string failed;
+		bool        patched{ false };
+
+		for (std::size_t i = 0; i < std::size(Patches::MODULES); ++i)
+		{
+			if (g_status[i] == Status::Patched)
+			{
+				patched = true;
+			}
+			else if (g_status[i] == Status::Failed)
+			{
+				failed += failed.empty() ? "" : ", ";
+				failed += Patches::MODULES[i].name;
+			}
+		}
+
+		// A module that never loaded is not an error - that mod is simply not
+		// installed. Only one that loaded and could not be patched is.
+		std::string warning;
+		if (!failed.empty())
+		{
+			warning = std::format("Installed but not patched, so their fixes are "
+			                      "not working: {}. See ScrambledUpdates.log",
+			                      failed);
+		}
+		else if (!patched)
+		{
+			warning = "None of the plugins ScrambledUpdates patches are installed, "
+			          "so it is inactive";
+		}
+		else
+		{
+			return;
+		}
 
 		logger::error("{}", warning);
-		RE::DebugMessageBox(warning);
+		RE::DebugMessageBox(warning.c_str());
 	}
 }
 
@@ -219,8 +262,8 @@ extern "C" __declspec(dllexport) bool SKSEPlugin_Preload(const SKSE::LoadInterfa
 		return true;
 	}
 
-	// ScrambledBugs exports no SKSEPlugin_Preload so it's never loaded at this point
-	WatchForScrambledBugs();
+	// None of them export SKSEPlugin_Preload, so none is loaded at this point
+	WatchForPlugins();
 
 	return true;
 }

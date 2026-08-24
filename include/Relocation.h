@@ -2,10 +2,8 @@
 
 #include <cstdint>
 
-namespace ScrambledBugs
+namespace Relocation
 {
-	inline constexpr wchar_t MODULE_NAME[]{ L"ScrambledBugs.dll" };
-
 	inline constexpr std::int32_t FORMAT_ANNIVERSARY_EDITION{ 2 };
 
 	struct Version
