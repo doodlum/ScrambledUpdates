@@ -228,7 +228,7 @@ namespace
 }
 
 SKSEPluginInfo(
-	.Version = REL::Version{ 1, 0, 0, 0 },
+	.Version = REL::Version{ 1, 1, 0, 0 },
 	.Name = "ScrambledUpdates"sv,
 	.Author = "doodlum"sv,
 	.StructCompatibility = SKSE::StructCompatibility::Independent,
