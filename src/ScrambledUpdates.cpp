@@ -62,16 +62,29 @@ namespace
 
 	Status g_status[std::size(Patches::MODULES)]{};
 
-	std::uint32_t PluginVersion(REX::W32::HMODULE module)
+	// The GUID out of the loaded image's CodeView record, which identifies the
+	// exact build. Debug directory is data directory 6; entry type 2 is CodeView,
+	// and in a mapped image its payload is at an RVA rather than a file offset.
+	const Patches::Guid* BuildGuid(const std::uint8_t* base)
 	{
-		auto* data = REX::W32::GetProcAddress(module, "SKSEPlugin_Version");
-		if (!data)
+		const auto* pe = base + *reinterpret_cast<const std::uint32_t*>(base + 0x3C);
+		const auto* directory = reinterpret_cast<const std::uint32_t*>(pe + 24 + 112 + 6 * 8);
+
+		for (std::uint32_t at = 0; at + 28 <= directory[1]; at += 28)
 		{
-			return 0;
+			const auto* entry = base + directory[0] + at;
+			if (*reinterpret_cast<const std::uint32_t*>(entry + 12) != 2)
+			{
+				continue;
+			}
+
+			const auto* record = base + *reinterpret_cast<const std::uint32_t*>(entry + 20);
+			if (std::memcmp(record, "RSDS", 4) == 0)
+			{
+				return reinterpret_cast<const Patches::Guid*>(record + 4);
+			}
 		}
-		// dataVersion at 0x0, pluginVersion at 0x4.
-		return *reinterpret_cast<const std::uint32_t*>(
-			reinterpret_cast<const std::uint8_t*>(data) + 4);
+		return nullptr;
 	}
 
 	void AbsoluteJump(std::uint8_t* target, void* destination)
@@ -86,15 +99,14 @@ namespace
 
 	bool Patch(const Patches::Module& target, REX::W32::HMODULE module)
 	{
-		const auto version = PluginVersion(module);
-		if (version != target.pluginVersion)
+		auto* base = reinterpret_cast<std::uint8_t*>(module);
+
+		const auto* build = BuildGuid(base);
+		if (!build || std::memcmp(build, &target.build, sizeof(*build)) != 0)
 		{
-			logger::error("{} is plugin version {}, expected {}",
-			              target.name, version, target.pluginVersion);
+			logger::error("{} is not the build these patches describe", target.name);
 			return false;
 		}
-
-		auto* base = reinterpret_cast<std::uint8_t*>(module);
 
 		for (const auto& site : target.displacements)
 		{
@@ -106,8 +118,8 @@ namespace
 		AbsoluteJump(base + target.headerRead, &HookHeaderRead);
 		AbsoluteJump(base + target.addressLibraryRead, &HookRead);
 
-		logger::info("patched {} {} at {}: {} displacements",
-		             target.name, version, static_cast<const void*>(base),
+		logger::info("patched {} at {}: {} displacements",
+		             target.name, static_cast<const void*>(base),
 		             target.displacements.size());
 		return true;
 	}
@@ -228,7 +240,7 @@ namespace
 }
 
 SKSEPluginInfo(
-	.Version = REL::Version{ 1, 1, 0, 0 },
+	.Version = REL::Version{ 1, 1, 1, 0 },
 	.Name = "ScrambledUpdates"sv,
 	.Author = "doodlum"sv,
 	.StructCompatibility = SKSE::StructCompatibility::Independent,

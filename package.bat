@@ -2,7 +2,7 @@
 setlocal
 
 set HERE=%~dp0
-set VERSION=1.1.0
+set VERSION=1.1.1
 set STAGE=%HERE%build\stage
 set OUT=%HERE%build\ScrambledUpdates-%VERSION%.zip
 
