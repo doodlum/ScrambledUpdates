@@ -42,6 +42,7 @@ namespace Patches
 		Guid                          build;
 		std::uint32_t                 headerRead;          // Header::Read
 		std::uint32_t                 addressLibraryRead;  // AddressLibrary::Read
+		std::uint32_t                 versionData;         // file offset, not an RVA
 		std::span<const Displacement> displacements;
 	};
 
@@ -49,14 +50,14 @@ namespace Patches
 		// 72FF555D-9E17-4A7B-9A64-50DC1030A5E4
 		{ L"ScrambledBugs.dll", "Scrambled Bugs",
 		  { 0x72FF555D, 0x9E17, 0x4A7B, { 0x9A, 0x64, 0x50, 0xDC, 0x10, 0x30, 0xA5, 0xE4 } },
-		  0x0404A0, 0x041750, SCRAMBLED_BUGS },
+		  0x0404A0, 0x041750, 0x08EE70, SCRAMBLED_BUGS },
 		// 76879527-999C-4CA2-BF31-0643B8A4F22A
 		{ L"ScriptEffectArchetypeCrashFix.dll", "Script Effect Archetype Crash Fix",
 		  { 0x76879527, 0x999C, 0x4CA2, { 0xBF, 0x31, 0x06, 0x43, 0xB8, 0xA4, 0xF2, 0x2A } },
-		  0x0220B0, 0x023460, {} },
+		  0x0220B0, 0x023460, 0x06A060, {} },
 		// 1EF99E87-85DB-47B3-8D02-CC447AD34F61
 		{ L"VendorRespawnFix.dll", "Vendor Respawn Fix",
 		  { 0x1EF99E87, 0x85DB, 0x47B3, { 0x8D, 0x02, 0xCC, 0x44, 0x7A, 0xD3, 0x4F, 0x61 } },
-		  0x023190, 0x024540, {} },
+		  0x023190, 0x024540, 0x06B660, {} },
 	};
 }

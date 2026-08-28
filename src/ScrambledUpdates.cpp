@@ -61,6 +61,7 @@ namespace
 	};
 
 	Status g_status[std::size(Patches::MODULES)]{};
+	int    g_updated{ 0 };
 
 	const Patches::Guid* BuildGuid(const std::uint8_t* base)
 	{
@@ -82,6 +83,117 @@ namespace
 			}
 		}
 		return nullptr;
+	}
+
+	// SKSE 2.3.1 refuses a plugin that claims address library independence, was
+	// linked before 2025-05-25, and does not declare AddressLibraryV5. That runs
+	// while SKSE scans the directory, before any plugin code, so the bit has to be
+	// in the file - it cannot be supplied at runtime. Setting it is only truthful
+	// because we replace the reader it refers to.
+	constexpr std::uint32_t VERSION_DATA_EX{ 0x304 };
+	constexpr std::uint8_t  EX_ADDRESS_LIBRARY_V5{ 1 << 1 };
+
+	// The same CodeView GUID, out of the file rather than a mapped image: on disk
+	// the debug directory's payload is at a file offset, not an RVA.
+	const Patches::Guid* FileBuildGuid(const std::vector<char>& file)
+	{
+		const auto* base = reinterpret_cast<const std::uint8_t*>(file.data());
+		const auto  u32  = [&](std::size_t o) {
+			return *reinterpret_cast<const std::uint32_t*>(base + o);
+		};
+		const auto u16 = [&](std::size_t o) {
+			return *reinterpret_cast<const std::uint16_t*>(base + o);
+		};
+
+		const std::size_t pe       = u32(0x3C);
+		const std::size_t optional = pe + 24;
+		const std::size_t table    = optional + u16(pe + 20);
+		const auto        count    = u16(pe + 6);
+
+		const auto toOffset = [&](std::uint32_t rva) -> std::size_t {
+			for (std::uint16_t i = 0; i < count; ++i)
+			{
+				const auto entry = table + i * 40u;
+				const auto va    = u32(entry + 12);
+				const auto size  = std::max(u32(entry + 8), u32(entry + 16));
+				if (rva >= va && rva < va + size)
+				{
+					return u32(entry + 20) + (rva - va);
+				}
+			}
+			return 0;
+		};
+
+		// data directory 6 is Debug; 0 is Export
+		const auto directory = toOffset(u32(optional + 112 + 6 * 8));
+		const auto bytes     = u32(optional + 116 + 6 * 8);
+
+		for (std::uint32_t at = 0; directory && at + 28 <= bytes; at += 28)
+		{
+			const auto entry = directory + at;
+			if (u32(entry + 12) != 2)
+			{
+				continue;
+			}
+
+			const auto record = u32(entry + 24);  // PointerToRawData
+			if (record + 20 <= file.size() && std::memcmp(base + record, "RSDS", 4) == 0)
+			{
+				return reinterpret_cast<const Patches::Guid*>(base + record + 4);
+			}
+		}
+		return nullptr;
+	}
+
+	// True if the file was changed. SKSE has already scanned by the time we run,
+	// so the bit only takes effect on the next launch.
+	bool DeclareAddressLibraryV5(const Patches::Module& target)
+	{
+		const auto path = std::filesystem::path{ L"Data/SKSE/Plugins" } / target.file;
+
+		std::vector<char> file;
+		{
+			std::ifstream in{ path, std::ios::binary };
+			if (!in)
+			{
+				return false;  // that mod is simply not installed
+			}
+			file.assign(std::istreambuf_iterator<char>{ in }, {});
+		}
+
+		const auto flagAt = target.versionData + VERSION_DATA_EX;
+		if (file.size() <= flagAt)
+		{
+			return false;
+		}
+
+		const auto* build = FileBuildGuid(file);
+		if (!build || std::memcmp(build, &target.build, sizeof(*build)) != 0)
+		{
+			logger::error("{} on disk is not the build these patches describe",
+			              target.name);
+			return false;
+		}
+
+		auto& flags = reinterpret_cast<std::uint8_t&>(file[flagAt]);
+		if (flags & EX_ADDRESS_LIBRARY_V5)
+		{
+			return false;
+		}
+		flags |= EX_ADDRESS_LIBRARY_V5;
+
+		std::fstream out{ path, std::ios::binary | std::ios::in | std::ios::out };
+		out.seekp(static_cast<std::streamoff>(flagAt));
+		out.put(static_cast<char>(flags));
+		if (!out)
+		{
+			logger::error("could not update {} - is it read only?", target.name);
+			return false;
+		}
+
+		logger::info("{}: declared AddressLibraryV5 so SKSE will load it",
+		             target.name);
+		return true;
 	}
 
 	void AbsoluteJump(std::uint8_t* target, void* destination)
@@ -215,7 +327,13 @@ namespace
 		}
 
 		std::string warning;
-		if (!failed.empty())
+		if (g_updated)
+		{
+			warning = std::format("Updated {} plugin(s) so SKSE will load them. "
+			                      "Restart Skyrim for them to take effect.",
+			                      g_updated);
+		}
+		else if (!failed.empty())
 		{
 			warning = std::format("Installed but not patched, so their fixes are "
 			                      "not working: {}. See ScrambledUpdates.log",
@@ -262,6 +380,11 @@ extern "C" __declspec(dllexport) bool SKSEPlugin_Preload(const SKSE::LoadInterfa
 	}
 
 	InitializeLog();
+
+	for (const auto& target : Patches::MODULES)
+	{
+		g_updated += DeclareAddressLibraryV5(target) ? 1 : 0;
+	}
 
 	if (!LoadAddressLibrary())
 	{
