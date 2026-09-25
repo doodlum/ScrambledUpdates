@@ -61,7 +61,6 @@ namespace
 	};
 
 	Status g_status[std::size(Patches::MODULES)]{};
-	int    g_updated{ 0 };
 
 	const Patches::Guid* BuildGuid(const std::uint8_t* base)
 	{
@@ -85,16 +84,9 @@ namespace
 		return nullptr;
 	}
 
-	// SKSE 2.3.1 refuses a plugin that claims address library independence, was
-	// linked before 2025-05-25, and does not declare AddressLibraryV5. That runs
-	// while SKSE scans the directory, before any plugin code, so the bit has to be
-	// in the file - it cannot be supplied at runtime. Setting it is only truthful
-	// because we replace the reader it refers to.
 	constexpr std::uint32_t VERSION_DATA_EX{ 0x304 };
 	constexpr std::uint8_t  EX_ADDRESS_LIBRARY_V5{ 1 << 1 };
 
-	// The same CodeView GUID, out of the file rather than a mapped image: on disk
-	// the debug directory's payload is at a file offset, not an RVA.
 	const Patches::Guid* FileBuildGuid(const std::vector<char>& file)
 	{
 		const auto* base = reinterpret_cast<const std::uint8_t*>(file.data());
@@ -124,7 +116,6 @@ namespace
 			return 0;
 		};
 
-		// data directory 6 is Debug; 0 is Export
 		const auto directory = toOffset(u32(optional + 112 + 6 * 8));
 		const auto bytes     = u32(optional + 116 + 6 * 8);
 
@@ -136,7 +127,7 @@ namespace
 				continue;
 			}
 
-			const auto record = u32(entry + 24);  // PointerToRawData
+			const auto record = u32(entry + 24);
 			if (record + 20 <= file.size() && std::memcmp(base + record, "RSDS", 4) == 0)
 			{
 				return reinterpret_cast<const Patches::Guid*>(base + record + 4);
@@ -145,24 +136,45 @@ namespace
 		return nullptr;
 	}
 
-	// True if the file was changed. SKSE has already scanned by the time we run,
-	// so the bit only takes effect on the next launch.
-	bool DeclareAddressLibraryV5(const Patches::Module& target)
+	constexpr std::uint32_t VERSION_DATA_INDEPENDENCE{ 0x308 };
+	constexpr std::uint8_t  INDEPENDENT_ADDRESS_LIBRARY{ 1 << 0 };
+	constexpr std::uint32_t STAMP_FLOOR{ 0x1F008600 };
+	constexpr std::uint32_t STAMP_RANGE{ 0x493328FF };
+
+	std::filesystem::path PluginPath(const Patches::Module& target)
 	{
-		const auto path = std::filesystem::path{ L"Data/SKSE/Plugins" } / target.file;
+		return std::filesystem::path{ L"Data/SKSE/Plugins" } / target.file;
+	}
+
+	// SKSE 2.3.1's own condition, evaluated from the same place it reads: the file.
+	bool SkseWillRefuse(const Patches::Module& target)
+	{
+		const auto path = PluginPath(target);
 
 		std::vector<char> file;
 		{
 			std::ifstream in{ path, std::ios::binary };
 			if (!in)
 			{
-				return false;  // that mod is simply not installed
+				return false;
 			}
 			file.assign(std::istreambuf_iterator<char>{ in }, {});
 		}
 
-		const auto flagAt = target.versionData + VERSION_DATA_EX;
-		if (file.size() <= flagAt)
+		if (file.size() <= target.versionData + VERSION_DATA_INDEPENDENCE + 4)
+		{
+			return false;
+		}
+
+		const auto* base = reinterpret_cast<const std::uint8_t*>(file.data());
+		const auto  u32  = [&](std::size_t o) {
+			return *reinterpret_cast<const std::uint32_t*>(base + o);
+		};
+
+		if (!(u32(target.versionData + VERSION_DATA_INDEPENDENCE) &
+		      INDEPENDENT_ADDRESS_LIBRARY) ||
+		    u32(target.versionData + VERSION_DATA_EX) & EX_ADDRESS_LIBRARY_V5 ||
+		    u32(u32(0x3C) + 8) - STAMP_FLOOR > STAMP_RANGE)
 		{
 			return false;
 		}
@@ -174,25 +186,6 @@ namespace
 			              target.name);
 			return false;
 		}
-
-		auto& flags = reinterpret_cast<std::uint8_t&>(file[flagAt]);
-		if (flags & EX_ADDRESS_LIBRARY_V5)
-		{
-			return false;
-		}
-		flags |= EX_ADDRESS_LIBRARY_V5;
-
-		std::fstream out{ path, std::ios::binary | std::ios::in | std::ios::out };
-		out.seekp(static_cast<std::streamoff>(flagAt));
-		out.put(static_cast<char>(flags));
-		if (!out)
-		{
-			logger::error("could not update {} - is it read only?", target.name);
-			return false;
-		}
-
-		logger::info("{}: declared AddressLibraryV5 so SKSE will load it",
-		             target.name);
 		return true;
 	}
 
@@ -298,6 +291,127 @@ namespace
 		spdlog::set_pattern("[%H:%M:%S] [%l] %v"s);
 	}
 
+	// Declaring AddressLibraryV5 is what stops SKSE 2.3.1 refusing the plugin, and
+	// it is truthful once we are installed, because we replace its format 5 reader.
+	// SKSE decides from the file while it scans, long before any plugin runs, so
+	// this can only take effect on the next launch.
+	bool DeclareAddressLibraryV5(const Patches::Module& target)
+	{
+		const auto path = PluginPath(target);
+		const auto at   = target.versionData + VERSION_DATA_EX;
+
+		{
+			std::fstream file{ path, std::ios::binary | std::ios::in | std::ios::out };
+			std::uint8_t flags{};
+			if (!file || !file.seekg(at).read(reinterpret_cast<char*>(&flags), 1))
+			{
+				logger::error("cannot read {}", target.name);
+				return false;
+			}
+
+			flags |= EX_ADDRESS_LIBRARY_V5;
+			if (!file.seekp(at).write(reinterpret_cast<const char*>(&flags), 1))
+			{
+				logger::error("cannot write {}", target.name);
+				return false;
+			}
+		}
+
+		// Read it back through a fresh handle. A write that was redirected or undone
+		// - by file virtualisation, or by a mod manager rebuilding its overlay -
+		// would otherwise restart the game for nothing, on every launch, forever.
+		std::ifstream check{ path, std::ios::binary };
+		std::uint8_t  written{};
+		if (!check.seekg(at).read(reinterpret_cast<char*>(&written), 1) ||
+		    !(written & EX_ADDRESS_LIBRARY_V5))
+		{
+			logger::error("{} did not keep the change", target.name);
+			return false;
+		}
+
+		logger::info("declared AddressLibraryV5 for {}", target.name);
+		return true;
+	}
+
+	constexpr const wchar_t* RESTARTED{ L"ScrambledUpdatesRestarted" };
+
+	// Relaunching means going back through SKSE's loader, not the game exe, so the
+	// next process gets its plugins as well as its hooks.
+	bool Relaunch()
+	{
+		// From the running exe rather than the working directory, because getting
+		// this wrong means quitting without coming back.
+		std::wstring game(REX::W32::MAX_PATH, L'\0');
+		game.resize(REX::W32::GetModuleFileNameW(nullptr, game.data(),
+		                                         static_cast<std::uint32_t>(game.size())));
+
+		const auto loader = std::filesystem::path{ game }.parent_path() / L"skse64_loader.exe";
+		if (game.empty() || !std::filesystem::exists(loader))
+		{
+			logger::error("no skse64_loader.exe beside the game");
+			return false;
+		}
+
+		REX::W32::STARTUPINFOW       startup{ .size = sizeof(startup) };
+		REX::W32::PROCESS_INFORMATION process{};
+
+		// Inherited by the process we are about to start, so it can tell that it is
+		// the second attempt.
+		REX::W32::SetEnvironmentVariableW(RESTARTED, L"1");
+
+		if (!REX::W32::CreateProcessW(loader.c_str(), nullptr, nullptr, nullptr, false,
+		                              0, nullptr, loader.parent_path().c_str(),
+		                              &startup, &process))
+		{
+			logger::error("could not start {}", loader.string());
+			return false;
+		}
+
+		REX::W32::CloseHandle(process.thread);
+		REX::W32::CloseHandle(process.process);
+		return true;
+	}
+
+	[[noreturn]] void Quit()
+	{
+		REX::W32::TerminateProcess(REX::W32::GetCurrentProcess(), 0);
+		std::unreachable();
+	}
+
+	// SKSE has already refused these plugins for this run and nothing a plugin does
+	// now can change that, so the only way to get them loaded is a fresh process.
+	// Preload is early enough that this costs a moment of startup and nothing else.
+	void EnableRefusedPlugins()
+	{
+		bool enabled{ false };
+		for (const auto& target : Patches::MODULES)
+		{
+			if (SkseWillRefuse(target) && DeclareAddressLibraryV5(target))
+			{
+				enabled = true;
+			}
+		}
+
+		if (!enabled)
+		{
+			return;
+		}
+
+		// The flag is on disk and verified, so a second refusal means something
+		// outside this process is undoing it. Carry on unpatched rather than
+		// restarting into the same wall for the rest of time.
+		if (REX::W32::GetEnvironmentVariableW(RESTARTED, nullptr, 0) != 0)
+		{
+			logger::error("still refused after restarting once - giving up");
+			return;
+		}
+
+		logger::info("restarting so SKSE will load them");
+
+		Relaunch();
+		Quit();
+	}
+
 	bool NeedsPatching()
 	{
 		return REL::Module::get().version() >= SKSE::RUNTIME_SSE_1_7_99;
@@ -327,13 +441,7 @@ namespace
 		}
 
 		std::string warning;
-		if (g_updated)
-		{
-			warning = std::format("Updated {} plugin(s) so SKSE will load them. "
-			                      "Restart Skyrim for them to take effect.",
-			                      g_updated);
-		}
-		else if (!failed.empty())
+		if (!failed.empty())
 		{
 			warning = std::format("Installed but not patched, so their fixes are "
 			                      "not working: {}. See ScrambledUpdates.log",
@@ -381,10 +489,8 @@ extern "C" __declspec(dllexport) bool SKSEPlugin_Preload(const SKSE::LoadInterfa
 
 	InitializeLog();
 
-	for (const auto& target : Patches::MODULES)
-	{
-		g_updated += DeclareAddressLibraryV5(target) ? 1 : 0;
-	}
+	// Replaces the process, and does not return, if anything had to be enabled.
+	EnableRefusedPlugins();
 
 	if (!LoadAddressLibrary())
 	{

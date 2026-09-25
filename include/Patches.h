@@ -42,7 +42,7 @@ namespace Patches
 		Guid                          build;
 		std::uint32_t                 headerRead;          // Header::Read
 		std::uint32_t                 addressLibraryRead;  // AddressLibrary::Read
-		std::uint32_t                 versionData;         // file offset, not an RVA
+		std::uint32_t                 versionData;
 		std::span<const Displacement> displacements;
 	};
 
