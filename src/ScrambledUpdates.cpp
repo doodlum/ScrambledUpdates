@@ -378,11 +378,21 @@ namespace
 		std::unreachable();
 	}
 
+	// The first SKSE that refuses plugins for not declaring AddressLibraryV5. Older
+	// ones load them as they are, where writing to them would buy a restart and
+	// nothing else.
+	constexpr REL::Version SKSE_REFUSES_WITHOUT_V5{ 2, 3, 1 };
+
 	// SKSE has already refused these plugins for this run and nothing a plugin does
 	// now can change that, so the only way to get them loaded is a fresh process.
 	// Preload is early enough that this costs a moment of startup and nothing else.
-	void EnableRefusedPlugins()
+	void EnableRefusedPlugins(const SKSE::LoadInterface* skse)
 	{
+		if (REL::Version::unpack(skse->SKSEVersion()) < SKSE_REFUSES_WITHOUT_V5)
+		{
+			return;
+		}
+
 		bool enabled{ false };
 		for (const auto& target : Patches::MODULES)
 		{
@@ -480,7 +490,7 @@ SKSEPluginLoad(const SKSE::LoadInterface* skse)
 	return true;
 }
 
-extern "C" __declspec(dllexport) bool SKSEPlugin_Preload(const SKSE::LoadInterface* /*skse*/)
+extern "C" __declspec(dllexport) bool SKSEPlugin_Preload(const SKSE::LoadInterface* skse)
 {
 	if (!NeedsPatching())
 	{
@@ -490,7 +500,7 @@ extern "C" __declspec(dllexport) bool SKSEPlugin_Preload(const SKSE::LoadInterfa
 	InitializeLog();
 
 	// Replaces the process, and does not return, if anything had to be enabled.
-	EnableRefusedPlugins();
+	EnableRefusedPlugins(skse);
 
 	if (!LoadAddressLibrary())
 	{
